@@ -19,23 +19,41 @@ class LlamaGuardModule(SecurityModule):
         Text to analyze: {text} [/INST]"""
 
         payload = {
-            "model": "mistral", # You can swap this for 'llama-guard3' if installed
+            "model": "llama-guard3", # Ensure you have run `ollama pull llama-guard3`
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": 0.0, "num_predict": 5} # 0 temp for deterministic output
+            "options": {"temperature": 0.0, "num_predict": 5} 
         }
 
         loop = asyncio.get_event_loop()
         try:
-            # Run requests asynchronously
-            r = await loop.run_in_executor(None, lambda: requests.post(self.url, json=payload, timeout=10))
+            # 1. CRITICAL FIX: Increased timeout from 10 to 60 seconds
+            r = await loop.run_in_executor(None, lambda: requests.post(self.url, json=payload, timeout=60))
             r.raise_for_status()
             verdict = r.json().get("response", "").strip().upper()
 
             if "UNSAFE" in verdict:
-                return {"enabled": True, "status": "FAIL", "score": 1.0, "reason": f"Flagged by Llama Guard ({self.check_type})"}
-            return {"enabled": True, "status": "PASS", "score": 0.0, "reason": "Safe"}
+                return {
+                    "module": self.name, # 2. UI FIX: Stamped module name
+                    "enabled": True, 
+                    "status": "FAIL", 
+                    "score": 1.0, 
+                    "reason": f"Flagged by Llama Guard ({self.check_type})"
+                }
+            return {
+                "module": self.name, # 2. UI FIX: Stamped module name
+                "enabled": True, 
+                "status": "PASS", 
+                "score": 0.0, 
+                "reason": "Safe"
+            }
             
         except Exception as e:
-            # Fail open or fail closed depending on your security posture; here we fail closed on error.
-            return {"enabled": True, "status": "FAIL", "score": 1.0, "reason": "Llama Guard API Error"}
+            # Fail closed on error, now capturing the exact error string for easier debugging
+            return {
+                "module": self.name, # 2. UI FIX: Stamped module name
+                "enabled": True, 
+                "status": "FAIL", 
+                "score": 1.0, 
+                "reason": f"Llama Guard API Error: {str(e)}" # 3. DEBUG FIX: Appended exact error
+            }
