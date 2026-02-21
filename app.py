@@ -1,39 +1,49 @@
 """
-Basic chatbot using Ollama with Mistral.
-Requires Ollama running locally with: ollama pull mistral
+Basic chatbot using Ollama with Mistral and Toggle-Driven Security.
 """
 
 import streamlit as st
-import requests
-import json
+import asyncio
 
-OLLAMA_URL = "http://localhost:11434"
+# Import the orchestrator pipeline (which handles the LLM and security modules)
+from core.orchestrator import process_request
+
 MODEL = "mistral"
-
-
-def get_ollama_response(messages: list[dict], stream: bool = False) -> str:
-    """Call Ollama chat API and return the assistant reply."""
-    url = f"{OLLAMA_URL}/api/chat"
-    payload = {"model": MODEL, "messages": messages, "stream": stream}
-    try:
-        # Shorter timeout so the UI doesn't "think" forever
-        r = requests.post(url, json=payload, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        return data.get("message", {}).get("content", "").strip()
-    except requests.exceptions.ConnectionError:
-        return "Error: Cannot reach Ollama. Is it running? Start with `ollama serve` and ensure the mistral model is pulled (`ollama pull mistral`)."
-    except requests.exceptions.Timeout:
-        return "Error: Request timed out."
-    except Exception as e:
-        return f"Error: {e}"
-
+MAX_HISTORY = 6
 
 def main():
-    st.set_page_config(page_title="Mistral Chatbot", page_icon="💬", layout="centered")
-    st.title("💬 Mistral Chatbot")
-    st.caption(f"Powered by Ollama · Model: {MODEL}")
+    st.set_page_config(page_title="Secure Mistral Chatbot", page_icon="🛡️", layout="centered")
+    st.title("🛡️ Secure Mistral Chatbot")
+    st.caption(f"Powered by Ollama · Model: {MODEL} · Modular Security Pipeline")
 
+    # --- SIDEBAR: SECURITY TOGGLES ---
+    with st.sidebar:
+        st.header("⚙️ Security Modules")
+        st.markdown("Turn modules on/off to bypass them seamlessly.")
+        
+        # Build the config dynamically based on UI toggles
+        security_config = {
+            "sanitization": {
+                "enabled": st.toggle("Input Sanitization", value=True)
+            },
+            "embedding_check": {
+                "enabled": st.toggle("Embedding Similarity", value=True),
+                "threshold": st.slider("Embedding Threshold", 0.0, 1.0, 0.85)
+            },
+            "llama_guard_pre": {
+                "enabled": st.toggle("Llama Guard (Pre-check)", value=True)
+            },
+            "llama_guard_post": {
+                "enabled": st.toggle("Llama Guard (Post-check)", value=True)
+            }
+        }
+        
+        st.divider()
+        if st.button("Clear chat history"):
+            st.session_state.messages = []
+            st.rerun()
+
+    # --- CHAT INTERFACE ---
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
@@ -48,22 +58,33 @@ def main():
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
+            with st.spinner("Analyzing and Processing..."):
+                # Grab chat history for context
+                history_slice = st.session_state.messages[-MAX_HISTORY:]
                 messages_for_api = [
                     {"role": m["role"], "content": m["content"]}
-                    for m in st.session_state.messages
+                    for m in history_slice
                 ]
-                response = get_ollama_response(messages_for_api)
-            st.markdown(response)
+                
+                # Execute the modular pipeline asynchronously
+                result = asyncio.run(process_request(prompt, messages_for_api, security_config, MODEL))
+                
+            # Handle the standardized pipeline result
+            if result["decision"] == "BLOCK":
+                # Render a block warning
+                response_text = f"🚨 **BLOCKED**: Flagged by {result.get('triggered_by', 'Unknown module')}."
+                st.error(response_text)
+                if "risk_score" in result:
+                    st.caption(f"Risk Score: {result['risk_score']:.2f}")
+            else:
+                # Render the safe output
+                response_text = result["output"]
+                st.markdown(response_text)
+                if result.get("pre_risk_score", 0) > 0:
+                    st.caption(f"✓ Passed security checks (Risk: {result['pre_risk_score']:.2f})")
 
-        st.session_state.messages.append({"role": "assistant", "content": response})
-
-    with st.sidebar:
-        st.header("Settings")
-        if st.button("Clear chat history"):
-            st.session_state.messages = []
-            st.rerun()
-
+        # Save assistant response to history
+        st.session_state.messages.append({"role": "assistant", "content": response_text})
 
 if __name__ == "__main__":
     main()
