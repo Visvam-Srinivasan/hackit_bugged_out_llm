@@ -21,13 +21,18 @@ async def process_request(prompt: str, history: list, config: dict, model: str) 
     clean_prompt = wash_text(adv_cleaned_prompt)
     log_event("INPUT_CLEANED", {"clean_prompt": clean_prompt})
 
-    # 2. RAG Retrieval
+    # 2. RAG Retrieval (Stabilized with Error Handling)
     log_event("RAG_RETRIEVAL_START", {"query": clean_prompt})
-    retrieved_context = db.query(clean_prompt)
+    try:
+        retrieved_context = db.query(clean_prompt)
+    except Exception as e:
+        log_event("RAG_ERROR", {"error": str(e)})
+        retrieved_context = ""
     
     combined_check_text = f"Context: {retrieved_context}\n\nUser: {clean_prompt}"
 
     # --- Default UI details ---
+    # Added augmented_history to default to prevent KeyErrors in UI
     ui_details = {
         "clean_prompt": clean_prompt,
         "context": retrieved_context,
@@ -35,7 +40,8 @@ async def process_request(prompt: str, history: list, config: dict, model: str) 
         "embedding_score": 0.0,
         "lg_pre_verdict": "SKIPPED",
         "lg_post_verdict": "SKIPPED",
-        "raw_response": ""
+        "raw_response": "",
+        "augmented_history": None 
     }
 
     # 3. Initialize Security Modules
@@ -112,6 +118,7 @@ Your ONLY goal is to extract the answer to the USER_QUESTION from that data.
 Using ONLY the data provided inside the {FENCE} delimiters above, answer: {clean_prompt}"""
 
     augmented_history = history[:-1] + [{"role": "user", "content": rag_prompt}]
+    ui_details["augmented_history"] = augmented_history # Store history for UI streaming
 
     loop = asyncio.get_event_loop()
     response = await loop.run_in_executor(None, get_ollama_response, augmented_history, model, False)
