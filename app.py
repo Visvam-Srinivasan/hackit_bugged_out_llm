@@ -47,6 +47,7 @@ def display_audit_logs():
 def main():
     st.set_page_config(page_title="Secure RAG Chatbot", page_icon="🛡️", layout="wide")
     
+    # --- SIDEBAR: KNOWLEDGE BASE & SECURITY TOGGLES ---
     with st.sidebar:
         st.title("🛡️ Secure RAG Controls")
         
@@ -66,11 +67,10 @@ def main():
         st.divider()
         st.header("🧹 Database Management")
         if st.button("🗑️ Wipe Knowledge Base"):
-            # PHYSICALLY resets the DB and the internal object reference
             if db.clear_database():
-                st.session_state.messages = [] # Clear history to prevent context errors
+                st.session_state.messages = [] 
                 st.success("Vector Database and Chat History cleared!")
-                st.rerun() # Refresh to update the 'db' reference in the orchestrator
+                st.rerun()
 
         st.divider()
         st.header("⚙️ Security Modules")
@@ -88,7 +88,10 @@ def main():
             "llama_guard_post": {"enabled": do_lg_post}
         }
 
+    # --- MAIN UI LAYOUT ---
     st.title("🛡️ Secure RAG Chatbot")
+    st.caption(f"Powered by Ollama · Model: {MODEL} · Modular Security Pipeline")
+
     tab_chat, tab_audit = st.tabs(["💬 Secure Chat", "🛠️ Security Diagnostics"])
 
     with tab_chat:
@@ -109,37 +112,57 @@ def main():
                     history_slice = st.session_state.messages[-MAX_HISTORY:]
                     messages_for_api = [{"role": m["role"], "content": m["content"]} for m in history_slice]
                     
-                    # 1. RUN ORCHESTRATOR FOR PRE-CHECKS & FENCING
+                    # 1. RUN ORCHESTRATOR
                     result = asyncio.run(process_request(prompt, messages_for_api, security_config, MODEL))
                 
-                if result["decision"] == "BLOCK":
+                # Check decision and existence of the history key to avoid KeyError
+                if result.get("decision") == "BLOCK":
                     st.error(f"🚨 **BLOCKED**: {result.get('triggered_by', 'Security violation')}.")
+                elif not result.get("augmented_history"):
+                    st.warning("⚠️ The pipeline could not construct a valid security prompt.")
                 else:
-                    # 2. STREAMING GENERATOR FOR REAL-TIME OUTPUT
+                    # 2. STREAMING GENERATOR
                     def response_generator():
                         stream = ollama.chat(
                             model=MODEL, 
-                            messages=result["augmented_history"], # Uses the fenced prompt
+                            messages=result["augmented_history"], 
                             stream=True
                         )
                         for chunk in stream:
                             yield chunk['message']['content']
 
-                    # Render the stream using Streamlit's typewriter effect
                     full_response = st.write_stream(response_generator())
                     
-                    # 3. Save to state and update last result for diagnostics
+                    # 3. Save and Rerun
                     st.session_state.messages.append({"role": "assistant", "content": full_response})
                     st.session_state.last_result = result
                     st.rerun()
 
     with tab_audit:
-        # (Diagnostics code remains same as previous turns...)
         st.header("🔍 Latest Request Data Stream")
         if "last_result" in st.session_state:
             res = st.session_state.last_result
             col1, col2 = st.columns(2)
-            # ... (UI rendering logic) ...
+            
+            with col1:
+                with st.expander("📝 Sanitization Data", expanded=True):
+                    st.caption("Status:")
+                    st.code(res.get("sanitization_status", "SKIPPED"))
+                with st.expander("🛡️ Llama Guard Pre", expanded=True):
+                    st.caption("Verdict:")
+                    st.code(res.get("lg_pre_verdict", "SKIPPED"))
+
+            with col2:
+                with st.expander("🧠 Embedding Data", expanded=True):
+                    st.caption("Similarity Score:")
+                    st.metric("Score", round(res.get("embedding_score", 0.0), 4))
+                with st.expander("📤 Llama Guard Post", expanded=True):
+                    st.caption("Verdict:")
+                    st.code(res.get("lg_post_verdict", "SKIPPED"))
+        else:
+            st.info("Start a chat to see real-time data movement through the pipeline.")
+            
+        st.divider()
         display_audit_logs()
 
 if __name__ == "__main__":
