@@ -2,6 +2,7 @@
 from core.base import SecurityModule
 import re
 
+
 class SanitizationModule(SecurityModule):
     async def run(self, text: str) -> dict:
         if not self.enabled:

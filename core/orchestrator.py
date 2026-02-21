@@ -1,43 +1,60 @@
+# core/orchestrator.py
 import asyncio
-from core.llm import get_ollama_response
 from core.interceptor import wash_text
+from core.llm import get_ollama_response
 from core.aggregator import aggregate_safety_results
-
-# Import your concrete modules here
-# from modules.sanitization import SanitizationModule etc.
+from core.utils import fast_output_filter # Ensure this is imported
 
 async def process_request(prompt: str, history: list, config: dict, model: str) -> dict:
-    loop = asyncio.get_event_loop()
-
-    # --- PHASE 1: INTERCEPTION ---
+    # 1. Layer 1: Clean the input
     clean_prompt = wash_text(prompt)
 
-    # --- PHASE 2: PARALLEL PRE-CHECKS ---
-    # Here you would initialize modules and gather tasks
-    # For now, we simulate an empty result list
-    pre_check_results = [] 
-    pre_auth = aggregate_safety_results(pre_check_results)
+    # 2. Initialize modules
+    from modules.sanitization import SanitizationModule
+    from modules.embedding import EmbeddingCheckModule
+    from modules.llamaguard import LlamaGuardModule
+
+    pre_check_modules = [
+        SanitizationModule(config.get("sanitization", {})),
+        EmbeddingCheckModule(config.get("embedding_check", {})),
+        LlamaGuardModule(config.get("llama_guard_pre", {}), check_type="pre")
+    ]
+
+    # 3. Layers 2-4: Parallel Pre-Checks
+    try:
+        tasks = [mod.run(clean_prompt) for mod in pre_check_modules]
+        pre_results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=10.0)
+    except asyncio.TimeoutError:
+        return {"decision": "BLOCK", "triggered_by": "Security Timeout"}
+
+    auth = aggregate_safety_results(pre_results)
+    if auth["decision"] == "BLOCK":
+        return auth
+
+    # 4. Layer 5: LLM Generation
+    loop = asyncio.get_event_loop()
+    # We pass the full history to maintain context
+    response = await loop.run_in_executor(None, get_ollama_response, history, model, False)
+
+    # 5. Layers 6 & 7: Post-Checks & Self-Correction
+    # Fast Filter check
+    is_fast_safe = fast_output_filter(response)
     
-    if pre_auth["decision"] == "BLOCK":
-        return pre_auth
+    # Deep Post-check (Llama Guard)
+    lg_post = LlamaGuardModule(config.get("llama_guard_post", {}), check_type="post")
+    post_result = await lg_post.run(response)
+    is_deep_safe = post_result["status"] != "FAIL"
 
-    # --- PHASE 3: EXECUTION (Initial Attempt) ---
-    response = await loop.run_in_executor(None, get_ollama_response, history, model)
-
-    # --- PHASE 4: POST-CHECK & RETRY (Option B) ---
-    # Low-latency string check for "system leaks" or bad keywords
-    if "PRIMARY DIRECTIVE" in response or "illegal" in response.lower():
-        if config["llama_guard_post"]["enabled"]:
-            # TRIGGER RETRY
-            response = await loop.run_in_executor(None, get_ollama_response, history, model, True)
-            
-            # If the retry is still bad, we block
-            if "illegal" in response.lower():
-                return {"decision": "BLOCK", "triggered_by": "Llama Guard (Post-check)"}
+    if not is_fast_safe or not is_deep_safe:
+        # Trigger Self-Correction Retry
+        response = await loop.run_in_executor(None, get_ollama_response, history, model, True)
+        
+        # Final validation of retried response
+        if not fast_output_filter(response):
+            return {"decision": "BLOCK", "triggered_by": "Post-check (Final Failure)"}
 
     return {
-        "decision": "ALLOW",
-        "output": response,
-        "triggered_by": None,
-        "pre_risk_score": pre_auth.get("risk_score", 0.0)
+        "decision": "ALLOW", 
+        "output": response, 
+        "pre_risk_score": auth.get("risk_score", 0.0)
     }
